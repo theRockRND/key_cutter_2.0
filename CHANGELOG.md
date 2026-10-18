@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.14
+
+### Added
+- Shutterstock CSVs fill **Categories**: the AI picks 1-2 categories from the Shutterstock list (Category 1 is required on the site, Category 2 is optional), e.g. `Transportation,Nature`. Names are the ones of the site list for videos (`Animals/Wildlife`, `Food and drink`...), unknown names are dropped. If the AI gives no valid category, categories whose words are among the keywords are used (`transportation`, `animal` -> `Transportation`, `Animals/Wildlife`); without them the log says to choose Category 1 on the site. Logged as `SHUTTERSTOCK CATEGORIES`
+- If no ESP tab is open in Chrome, the app opens esp.gettyimages.com itself before looking up iStock keywords (logged as `No ESP tab was open: opened ...`). If ESP asks to sign in, the log says so and the run goes on without ESP as before
+
+### Changed
+- The last input and output folders are remembered between launches (a folder that no longer exists is left empty). Country of shoot and Make CSV for are saved as soon as they change, not only on Start
+- **Shot speed (iStock)** is no longer remembered: it is Real Time at every launch, choose Slow Motion / Time Lapse for the run they apply to
+
+### Fixed
+- Stock terms ending in `-scape` / `-lapse` are not split as glued words: `nightscape` became `night`, `scape` because the macOS spell checker does not know it, and `scape` went to all CSVs
+- A two-word AI keyword that is one such term is joined: `time lapse` -> `timelapse` (was `time`, `lapse` as two keywords)
+
 ## 1.1.13
 
 ### Fixed

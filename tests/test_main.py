@@ -29,6 +29,7 @@ def setUpModule():
         mock.patch.object(istock_keywords, 'run_in_esp_tab', unavailable),
         mock.patch.object(main, 'esp_lookup_words', unavailable),
         mock.patch.object(main, 'esp_title_suggestions', unavailable),
+        mock.patch.object(main, 'open_esp_tab', mock.Mock(return_value=False)),
         mock.patch.object(main, 'find_glued_words', mock.Mock(return_value={})),
         mock.patch.object(main, 'IstockVocabulary',
                           lambda: istock_keywords.IstockVocabulary(Path(VOCAB_TMP.name) / 'vocabulary.json')),
@@ -139,6 +140,15 @@ class MetadataRulesTest(unittest.TestCase):
     def test_video_category(self):
         self.assertEqual(generate(self.thread, AI_RESPONSE, HD)['category'], 'Video')
 
+    def test_shutterstock_categories_from_ai(self):
+        response = dict(AI_RESPONSE, categories='nature, Transportation')
+        self.assertEqual(generate(self.thread, response, HD)['shutterstock_categories'], ['Nature', 'Transportation'])
+        self.assertIn('SHUTTERSTOCK CATEGORIES: Nature, Transportation', '\n'.join(self.thread.logs))
+
+    def test_shutterstock_categories_from_keywords_without_ai_pick(self):
+        # AI_RESPONSE has no categories; 'nature' is among its keywords
+        self.assertEqual(generate(self.thread, AI_RESPONSE, HD)['shutterstock_categories'], ['Nature'])
+
     def test_vertical_video_words(self):
         metadata = generate(self.thread, AI_RESPONSE, VERTICAL)
         self.check_common_rules(metadata)
@@ -189,6 +199,13 @@ class MetadataRulesTest(unittest.TestCase):
         self.assertNotIn('stationhouse', keywords)
         self.assertNotIn('railwayline', keywords)
         self.assertIn("Glued keyword 'stationhouse' split into: station, house", '\n'.join(self.thread.logs))
+
+    def test_compound_phrase_joined(self):
+        response = dict(AI_RESPONSE, keywords="time lapse, night-scape, " + AI_RESPONSE['keywords'])
+        keywords = generate(self.thread, response)['keywords'].split(', ')
+        self.assertEqual(keywords[:2], ['timelapse', 'nightscape'])
+        for part in ('time', 'lapse', 'night', 'scape'):
+            self.assertNotIn(part, keywords)
 
     def test_short_title_padded_from_keywords_not_description(self):
         response = {"title": "Snowman With Stick Arms In Winter Park",
@@ -487,6 +504,13 @@ class GluedWordsTest(unittest.TestCase):
             self.assertEqual(FIND_GLUED_WORDS(['railwayline']), {})
         self.assertEqual(FIND_GLUED_WORDS(['car', 'rail']), {})  # short words are not checked
 
+    def test_compound_terms_not_split(self):
+        # The spell checker does not know nightscape, but "night, scape" is not a stock keyword
+        with mock.patch.object(main.subprocess, 'run') as run:
+            self.assertEqual(FIND_GLUED_WORDS(['nightscape', 'hyperlapse', 'skyscapes']), {})
+        run.assert_not_called()
+        self.assertEqual(FIND_GLUED_WORDS(['nightscape', 'railwayline']), {'railwayline': ('railway', 'line')})
+
 
 class CleanTextTest(unittest.TestCase):
     def test_hyphen_separates_words(self):
@@ -573,6 +597,21 @@ class ShutterstockCsvTest(unittest.TestCase):
         self.assertEqual(main.shutterstock_row('a.jpg', meta),
                          ['a.jpg', 'Railway Track Curving Through Pine Forest. The camera glides along a quiet route',
                           'train,rails,tunnel', '', 'no', 'no', 'no'])
+        meta['shutterstock_categories'] = ['Transportation', 'Nature']
+        self.assertEqual(main.shutterstock_row('a.jpg', meta)[3], 'Transportation,Nature')
+
+    def test_categories(self):
+        self.assertEqual(main.shutterstock_categories('food AND drink, Sky, nature, people'),
+                         ['Food and drink', 'Nature'])
+        self.assertEqual(main.shutterstock_categories(['Animals/Wildlife']), ['Animals/Wildlife'])
+        # No valid AI pick: categories whose words are keywords (singular too), in keyword order
+        self.assertEqual(main.shutterstock_categories('Sky', 'train, transportation, animal, nature'),
+                         ['Transportation', 'Animals/Wildlife'])
+        self.assertEqual(main.shutterstock_categories(None, 'sky, cloud'), [])
+
+    def test_prompt_lists_all_categories(self):
+        for name in main.SHUTTERSTOCK_CATEGORIES:
+            self.assertIn(name, main.ANALYSIS_PROMPT)
 
     def test_description_fits_200_characters(self):
         meta = {'title': 'Railway Track Curving Through Pine Forest', 'description': 'word ' * 40}
@@ -901,6 +940,55 @@ class BatchProcessingTest(unittest.TestCase):
         with open(self.output / 'iStock' / 'istock_videos_2.csv', newline='', encoding='utf-8') as f:
             self.assertEqual(len(list(csv.DictReader(f))), 2)
         self.assertIn(f"Metadata CSV: {self.output / 'iStock' / 'istock_videos_2.csv'}", '\n'.join(thread.logs))
+
+
+
+class RememberedSettingsTest(unittest.TestCase):
+    """Folders and settings survive a restart, shot speed is Real Time at every launch.
+    Settings go to a temporary ini file, never to the user's real settings"""
+
+    def setUp(self):
+        from PyQt6.QtWidgets import QApplication
+        self.qt_app = QApplication.instance() or QApplication([])
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        ini, settings_class = str(self.tmp / 'settings.ini'), main.QSettings
+        for patch in (mock.patch.object(main, 'QSettings',
+                                        lambda *args: settings_class(ini, settings_class.Format.IniFormat)),
+                      mock.patch.object(main, 'load_saved_api_key', return_value=None)):
+            patch.start()
+            self.addCleanup(patch.stop)
+
+    def open_window(self):
+        window = main.KeyCutterApp()
+        self.addCleanup(window.close)
+        return window
+
+    def test_restart_keeps_settings_except_shot_speed(self):
+        source, output = self.tmp / 'source', self.tmp / 'output'
+        source.mkdir()
+        output.mkdir()
+        window = self.open_window()
+        with mock.patch.object(main.QFileDialog, 'getExistingDirectory', side_effect=[str(source), str(output)]):
+            window.select_input_folder()
+            window.select_output_folder()
+        window.country_edit.setText('Serbia')
+        window.stock_checkboxes['istock'].setChecked(False)
+        window.shot_speed_combo.setCurrentText('Time Lapse')
+
+        window = self.open_window()
+        self.assertEqual((window.selected_folder, window.output_folder), (str(source), str(output)))
+        self.assertEqual(window.folder_path_edit.text(), str(source))
+        self.assertEqual(window.country_edit.text(), 'Serbia')
+        self.assertEqual([k for k, c in window.stock_checkboxes.items() if c.isChecked()], ['adobe', 'shutterstock'])
+        self.assertEqual(window.shot_speed_combo.currentText(), 'Real Time')
+
+    def test_removed_folder_is_not_restored(self):
+        main.QSettings().setValue('input_folder', str(self.tmp / 'gone'))
+        window = self.open_window()
+        self.assertIsNone(window.selected_folder)
+        self.assertEqual(window.folder_path_edit.text(), '')
 
 
 if __name__ == '__main__':

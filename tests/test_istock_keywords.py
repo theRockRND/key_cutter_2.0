@@ -166,6 +166,46 @@ class RefineIstockKeywordsTest(unittest.TestCase):
         self.assertIn('ESP is not available', log)
         self.assertIn('4 words were not checked in ESP', log)
 
+    def test_esp_tab_opened_when_missing(self):
+        self.thread.api_key = None
+        with mock.patch.object(main, 'open_esp_tab', return_value=True):
+            self.thread.refine_istock_keywords()
+        self.assertIn('No ESP tab was open: opened https://esp.gettyimages.com/ in Chrome', '\n'.join(self.thread.logs))
+        main.esp_lookup_words.assert_called_once()
+
+    def test_esp_sign_in_needed(self):
+        self.thread.api_key = None
+        with mock.patch.object(main, 'open_esp_tab', side_effect=istock_keywords.EspUnavailable("asks to sign in")):
+            self.thread.refine_istock_keywords()
+        main.esp_lookup_words.assert_not_called()
+        self.assertIn('ESP is not available (asks to sign in). Sign in to esp.gettyimages.com', '\n'.join(self.thread.logs))
+
+
+class OpenEspTabTest(unittest.TestCase):
+    def run_with(self, stdout, returncode=0):
+        done = mock.Mock(stdout=stdout, stderr='', returncode=returncode)
+        with mock.patch.object(istock_keywords.subprocess, 'run', return_value=done) as run:
+            result = istock_keywords.open_esp_tab(wait=5)
+        self.assertIn('https://esp.gettyimages.com/', run.call_args[0][0][2])
+        return result
+
+    def test_already_open(self):
+        self.assertFalse(self.run_with('FOUND\n'))
+
+    def test_opened(self):
+        self.assertTrue(self.run_with('OPENED https://esp.gettyimages.com/submit\n'))
+
+    def test_sign_in_page(self):
+        with self.assertRaisesRegex(istock_keywords.EspUnavailable, 'asks to sign in'):
+            self.run_with('OPENED https://auth.gettyimages.com/sign-in?x=1\n')
+
+    def test_chrome_not_scriptable(self):
+        with self.assertRaises(istock_keywords.EspUnavailable):
+            self.run_with('', returncode=1)
+        with mock.patch.object(istock_keywords.subprocess, 'run', side_effect=FileNotFoundError):
+            with self.assertRaises(istock_keywords.EspUnavailable):
+                istock_keywords.open_esp_tab()
+
 
 if __name__ == '__main__':
     unittest.main()

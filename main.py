@@ -67,12 +67,12 @@ def save_api_key(api_key):
         print(f"Failed to save API key to keychain: {e}")
         return False
 
-__version__ = "1.1.13"
+__version__ = "1.1.14"
 
 # Local models removed - using only OpenAI API
 
 from istock_keywords import (IstockVocabulary, EspUnavailable, esp_lookup_words, esp_title_suggestions,
-                             finalize_terms, MAX_ISTOCK_KEYWORDS)
+                             finalize_terms, open_esp_tab, ESP_URL_PREFIX, MAX_ISTOCK_KEYWORDS)
 from video_utils import (VIDEO_EXTENSIONS, is_video_file, probe_video, check_video_requirements,
                          get_orientation, extract_frames)
 
@@ -84,7 +84,8 @@ Return ONLY a JSON object with this exact structure (no markdown, no code blocks
 {
   "title": "descriptive title based on what you see in the image, English only, no special characters",
   "description": "one natural English sentence about the image, 40-80 characters, no special characters",
-  "keywords": "comma-separated list of 65 individual words describing the image content, English only, no special characters, only single words not phrases"
+  "keywords": "comma-separated list of 65 individual words describing the image content, English only, no special characters, only single words not phrases",
+  "categories": "1 or 2 comma-separated categories, best fitting first, ONLY from: Animals/Wildlife, Arts, Backgrounds/Textures, Buildings/Landmarks, Business/Finance, Education, Food and drink, Healthcare/Medical, Holidays, Industrial, Nature, Objects, People, Religion, Science, Signs/Symbols, Sports/Recreation, Technology, Transportation"
 }
 
 CRITICAL RULES:
@@ -110,11 +111,17 @@ SHOT_SPEEDS = ['Real Time', 'Slow Motion', 'Time Lapse']
 # Shutterstock: Portfolio > Not submitted > Upload CSV, photos and videos are separate tabs
 SHUTTERSTOCK_PHOTO_CSV_NAME = 'shutterstock_photos.csv'
 SHUTTERSTOCK_VIDEO_CSV_NAME = 'shutterstock_videos.csv'
-# Columns, their order and yes/no values as in the Shutterstock sample (csv-templates/shutterstock-MetadataTemplate.csv).
-# Categories are chosen on the site
+# Columns, their order and yes/no values as in the Shutterstock sample (csv-templates/shutterstock-MetadataTemplate.csv)
 SHUTTERSTOCK_CSV_FIELDS = ['Filename', 'Description', 'Keywords', 'Categories', 'Editorial', 'Mature content',
                            'illustration']
 SHUTTERSTOCK_MAX_DESCRIPTION = 200
+# Category 1 (required) and Category 2 (optional) on Shutterstock: names as in the site list for videos
+# (photos have these and a few more). The AI picks them, ANALYSIS_PROMPT lists the same names
+SHUTTERSTOCK_CATEGORIES = ['Animals/Wildlife', 'Arts', 'Backgrounds/Textures', 'Buildings/Landmarks', 'Business/Finance',
+                           'Education', 'Food and drink', 'Healthcare/Medical', 'Holidays', 'Industrial', 'Nature',
+                           'Objects', 'People', 'Religion', 'Science', 'Signs/Symbols', 'Sports/Recreation',
+                           'Technology', 'Transportation']
+SHUTTERSTOCK_MAX_CATEGORIES = 2
 # Stock sites a CSV can be made for: key -> name in Settings and of its CSV folder in the output folder
 STOCKS = {'adobe': 'Adobe Stock', 'istock': 'iStock', 'shutterstock': 'Shutterstock'}
 CSV_STOCKS = {VIDEO_CSV_NAME: 'adobe', ISTOCK_VIDEO_CSV_NAME: 'istock', SHUTTERSTOCK_VIDEO_CSV_NAME: 'shutterstock',
@@ -138,9 +145,24 @@ def shutterstock_description(metadata):
     return text if len(text) <= SHUTTERSTOCK_MAX_DESCRIPTION else title[:SHUTTERSTOCK_MAX_DESCRIPTION]
 
 
+def shutterstock_categories(ai_categories, keywords=''):
+    """Up to 2 Shutterstock categories: the ones the AI picked (any case, a list or a comma-separated text),
+    unknown names are dropped. Without a valid AI pick, the categories whose words are among the keywords
+    (keyword order): 'train, rails, transportation' -> Transportation"""
+    names = {name.lower(): name for name in SHUTTERSTOCK_CATEGORIES}
+    picked = ai_categories if isinstance(ai_categories, list) else str(ai_categories or '').split(',')
+    result = [names[p.strip().lower()] for p in picked if isinstance(p, str) and p.strip().lower() in names]
+    if not result:
+        category_words = {name: set(re.split(r'/| and ', name.lower())) for name in SHUTTERSTOCK_CATEGORIES}
+        for keyword in (k.strip().lower() for k in keywords.split(',')):
+            result += [name for name, words in category_words.items() if keyword in words or keyword + 's' in words]
+    return list(dict.fromkeys(result))[:SHUTTERSTOCK_MAX_CATEGORIES]
+
+
 def shutterstock_row(filename, metadata):
     keywords = ','.join(k.strip() for k in metadata.get('keywords', '').split(',') if k.strip())
-    return [filename, shutterstock_description(metadata), keywords, '', 'no', 'no', 'no']
+    categories = ','.join(metadata.get('shutterstock_categories', []))
+    return [filename, shutterstock_description(metadata), keywords, categories, 'no', 'no', 'no']
 
 
 def load_istock_fields(template_path=ISTOCK_TEMPLATE_PATH):
@@ -255,10 +277,15 @@ function run(argv) {
 }"""
 
 
+# Stock terms written as one word that the spell checker may not know: nightscape, skyscape, hyperlapse.
+# They are never split ("night, scape"), and a two-word AI keyword that makes one ("time lapse") is joined
+COMPOUND_SUFFIXES = ('scape', 'scapes', 'lapse', 'lapses')
+
+
 def find_glued_words(words, timeout=15):
     """{word: (first, second)} for words glued from two real words ("railwayline" -> railway, line).
     Stock sites reject such keywords. Empty dict if the macOS spell checker is not available"""
-    candidates = sorted({w for w in words if len(w) >= 6})
+    candidates = sorted({w for w in words if len(w) >= 6 and not w.endswith(COMPOUND_SUFFIXES)})
     if not candidates:
         return {}
     try:
@@ -1088,14 +1115,19 @@ class ProcessingThread(QThread):
                 keywords_list.append(word)
                 keywords_seen.add(word)
             
+            phrase_parts = set()  # "time lapse" became "timelapse": its parts are not added on their own
             for kw in keywords_str_raw.split(','):
                 words = self.normalize_words(kw)
                 if len(words) == 1:
                     add_keyword(words[0])
+                elif len(words) == 2 and ''.join(words).endswith(COMPOUND_SUFFIXES):
+                    add_keyword(''.join(words))
+                    phrase_parts.update(words)
             from_ai = len(keywords_list)
             # Supplement from other AI words (title/description words are excluded by rules)
             for word in all_words_filtered:
-                add_keyword(word)
+                if word not in phrase_parts:
+                    add_keyword(word)
             keywords_list = keywords_list[:MAX_KEYWORDS]
             
             self.log_message.emit(f"    [Metadata] KEYWORDS: {len(keywords_list)} (from AI keywords: {from_ai})")
@@ -1114,12 +1146,13 @@ class ProcessingThread(QThread):
                 raise Exception(f"❌ CRITICAL ERROR: Description contains {len(description)} characters (requires 15-80)")
             
             self.log_message.emit(f"    ✓ AI analysis completed: title={title_length} words, description={len(description)} characters, keywords={len(keywords_list)} words")
-            
+
             return {
                 'title': title,
                 'description': description,
                 'keywords': keywords,
                 'category': category,
+                'shutterstock_categories': self.pick_shutterstock_categories(ai_metadata.get('categories'), keywords),
                 'model_release': 'No'
             }
         
@@ -1156,14 +1189,24 @@ class ProcessingThread(QThread):
             
         # Limit to 80 characters, truncating at word boundarysа (without ellipsis)
         description = self.truncate_description(description, max_length=80)
-        
+
         return {
             'title': title,
             'description': description,
             'keywords': keywords,
             'category': category,
+            'shutterstock_categories': self.pick_shutterstock_categories(None, keywords),
             'model_release': 'No'
         }
+
+    def pick_shutterstock_categories(self, ai_categories, keywords):
+        """Shutterstock categories for the CSV (see shutterstock_categories), logged"""
+        categories = shutterstock_categories(ai_categories, keywords)
+        if categories:
+            self.log_message.emit(f"    [Metadata] SHUTTERSTOCK CATEGORIES: {', '.join(categories)}")
+        else:
+            self.log_message.emit(f"    ⚠ WARNING: No Shutterstock category (AI gave {ai_categories!r}): choose Category 1 on the site")
+        return categories
     
     def write_metadata_to_image(self, image_path, metadata):
         """Writes metadata (title, description, keywords) в файл fromображения"""
@@ -1383,13 +1426,15 @@ class ProcessingThread(QThread):
         missing = vocabulary.missing(all_words)
         suggestions = {}
         try:
+            if open_esp_tab():
+                self.log_message.emit(f"    [iStock] No ESP tab was open: opened {ESP_URL_PREFIX} in Chrome")
             if missing:
                 self.log_message.emit(f"    [iStock] Looking up {len(missing)} new words in ESP...")
                 vocabulary.update(esp_lookup_words(missing))
                 vocabulary.save()
             suggestions = esp_title_suggestions([row['metadata'].get('title', '') for row in self._video_rows])
         except EspUnavailable as e:
-            self.log_message.emit(f"    ⚠ [iStock] ESP is not available ({e}). Open esp.gettyimages.com in Chrome "
+            self.log_message.emit(f"    ⚠ [iStock] ESP is not available ({e}). Sign in to esp.gettyimages.com in Chrome "
                                   f"and allow View > Developer > Allow JavaScript from Apple Events. "
                                   f"Words not in the saved vocabulary stay as is, no title suggestions")
         unknown_total = set()
@@ -1697,7 +1742,18 @@ class KeyCutterApp(QMainWindow):
         output_layout.addWidget(output_btn)
         output_group.setLayout(output_layout)
         layout.addWidget(output_group)
-        
+
+        # Last chosen folders, if they still exist
+        settings = QSettings(KEYRING_SERVICE, 'app')
+        input_folder = settings.value('input_folder', '', type=str)
+        if input_folder and os.path.isdir(input_folder):
+            self.folder_path_edit.setText(input_folder)
+            self.selected_folder = input_folder
+        output_folder = settings.value('output_folder', '', type=str)
+        if output_folder and os.path.isdir(output_folder):
+            self.output_path_edit.setText(output_folder)
+            self.output_folder = output_folder
+
         # Processing settings
         settings_group = QGroupBox("Settings")
         settings_layout = QVBoxLayout()
@@ -1720,17 +1776,19 @@ class KeyCutterApp(QMainWindow):
         self.country_edit = QLineEdit()
         self.country_edit.setText(QSettings(KEYRING_SERVICE, 'app').value('istock_country', '', type=str))
         self.country_edit.setPlaceholderText("e.g. Serbia (as in ESP Country of shoot list)")
+        self.country_edit.textChanged.connect(
+            lambda text: QSettings(KEYRING_SERVICE, 'app').setValue('istock_country', text.strip()))
         country_layout.addWidget(country_label)
         country_layout.addWidget(self.country_edit)
         settings_layout.addLayout(country_layout)
         
-        # Shot speed for iStock CSV (ESP requires it), remembered between launches
+        # Shot speed for iStock CSV (ESP requires it). Not remembered: Real Time at every launch,
+        # Slow Motion / Time Lapse are chosen for the run they apply to
         shot_speed_layout = QHBoxLayout()
         shot_speed_label = QLabel("Shot speed (iStock):")
         self.shot_speed_combo = QComboBox()
         self.shot_speed_combo.addItems(SHOT_SPEEDS)
-        saved_speed = QSettings(KEYRING_SERVICE, 'app').value('istock_shot_speed', SHOT_SPEEDS[0], type=str)
-        self.shot_speed_combo.setCurrentText(saved_speed if saved_speed in SHOT_SPEEDS else SHOT_SPEEDS[0])
+        self.shot_speed_combo.setCurrentText(SHOT_SPEEDS[0])
         shot_speed_layout.addWidget(shot_speed_label)
         shot_speed_layout.addWidget(self.shot_speed_combo)
         settings_layout.addLayout(shot_speed_layout)
@@ -1743,6 +1801,7 @@ class KeyCutterApp(QMainWindow):
         for key, name in STOCKS.items():
             checkbox = QCheckBox(name)
             checkbox.setChecked(key in saved_stocks)
+            checkbox.toggled.connect(self.save_stocks)
             stocks_layout.addWidget(checkbox)
             self.stock_checkboxes[key] = checkbox
         stocks_layout.addStretch()
@@ -1784,12 +1843,20 @@ class KeyCutterApp(QMainWindow):
         if folder:
             self.folder_path_edit.setText(folder)
             self.selected_folder = folder
-    
+            QSettings(KEYRING_SERVICE, 'app').setValue('input_folder', folder)
+
     def select_output_folder(self):
         folder = QFileDialog.getExistingDirectory(self, "Select folder for saving processed files")
         if folder:
             self.output_path_edit.setText(folder)
             self.output_folder = folder
+            QSettings(KEYRING_SERVICE, 'app').setValue('output_folder', folder)
+
+    def save_stocks(self):
+        """Remembers the checked stock sites (Make CSV for) for the next launch"""
+        stocks = [key for key, checkbox in self.stock_checkboxes.items() if checkbox.isChecked()]
+        QSettings(KEYRING_SERVICE, 'app').setValue('csv_stocks', stocks)
+        return stocks
     
     def log(self, message):
         """Adds message to log"""
@@ -1824,11 +1891,8 @@ class KeyCutterApp(QMainWindow):
                 self.log("[UI] ⚠ Failed to save API key to keychain")
         
         country = self.country_edit.text().strip()
-        QSettings(KEYRING_SERVICE, 'app').setValue('istock_country', country)
         shot_speed = self.shot_speed_combo.currentText()
-        QSettings(KEYRING_SERVICE, 'app').setValue('istock_shot_speed', shot_speed)
-        stocks = [key for key, checkbox in self.stock_checkboxes.items() if checkbox.isChecked()]
-        QSettings(KEYRING_SERVICE, 'app').setValue('csv_stocks', stocks)
+        stocks = self.save_stocks()
         
         self.log(f"[UI] Creating processing thread: api_type=openai (GPT), generate_metadata=True")
         

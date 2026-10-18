@@ -3,7 +3,8 @@
 ESP accepts only terms of its own vocabulary: "sleepers" stays red, "Railroad Tie" is accepted at once.
 Candidate terms for our words and title suggestions come from ESP itself (the same requests the ESP page
 makes for keyword disambiguation and "Get suggestions"). ESP needs a logged-in session, so the requests run
-inside an open ESP tab in Google Chrome (View > Developer > Allow JavaScript from Apple Events).
+inside an ESP tab in Google Chrome (opened automatically if none is open; View > Developer > Allow
+JavaScript from Apple Events).
 Looked-up words are kept in istock_vocabulary.json, so known words need no ESP.
 """
 import json
@@ -36,8 +37,50 @@ _OSASCRIPT = '''on run argv
 end run''' % ESP_URL_PREFIX
 
 
+# Opens ESP in a new Chrome tab when no ESP tab is open and waits for it to load.
+# Prints FOUND, or OPENED and the URL the tab ended on (a sign-in page if the session is gone)
+_OPEN_ESP_OSASCRIPT = '''on run argv
+  set waitSeconds to (item 1 of argv) as integer
+  tell application "Google Chrome"
+    repeat with w in windows
+      repeat with t in tabs of w
+        if URL of t starts with "%s" then return "FOUND"
+      end repeat
+    end repeat
+    if (count of windows) = 0 then make new window
+    set t to make new tab at end of tabs of window 1 with properties {URL:"%s"}
+    repeat waitSeconds * 2 times
+      if not (loading of t) then exit repeat
+      delay 0.5
+    end repeat
+    -- ESP is a single-page app: a lost session is redirected to sign-in after the page loads
+    delay 3
+    return "OPENED " & (URL of t)
+  end tell
+end run''' % (ESP_URL_PREFIX, ESP_URL_PREFIX)
+
+
 class EspUnavailable(Exception):
     """ESP tab is not open in Chrome, JavaScript from Apple Events is off, or a request failed"""
+
+
+def open_esp_tab(wait=30):
+    """Opens ESP in Google Chrome if no ESP tab is open. Returns True if a tab was opened, False if one
+    was already open. EspUnavailable if Chrome cannot be driven or ESP asks to sign in"""
+    try:
+        result = subprocess.run(['osascript', '-e', _OPEN_ESP_OSASCRIPT, str(wait)], capture_output=True,
+                                text=True, timeout=wait + 20)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise EspUnavailable(f"could not open ESP in Chrome: {e}")
+    output = result.stdout.strip()
+    if result.returncode != 0 or not output:
+        raise EspUnavailable(f"could not open ESP in Chrome: {result.stderr.strip()[:300]}")
+    if output == 'FOUND':
+        return False
+    url = output.removeprefix('OPENED ').strip()
+    if not url.startswith(ESP_URL_PREFIX):
+        raise EspUnavailable(f"ESP opened in Chrome but asks to sign in ({url[:100]})")
+    return True
 
 
 def run_in_esp_tab(js, timeout=30):
