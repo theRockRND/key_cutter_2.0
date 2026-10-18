@@ -17,6 +17,7 @@ import json
 import httpx
 import time
 import tempfile
+import threading
 from datetime import datetime
 from PIL import Image
 import piexif
@@ -67,12 +68,12 @@ def save_api_key(api_key):
         print(f"Failed to save API key to keychain: {e}")
         return False
 
-__version__ = "1.1.14"
+__version__ = "1.1.15"
 
 # Local models removed - using only OpenAI API
 
 from istock_keywords import (IstockVocabulary, EspUnavailable, esp_lookup_words, esp_title_suggestions,
-                             finalize_terms, open_esp_tab, ESP_URL_PREFIX, MAX_ISTOCK_KEYWORDS)
+                             finalize_terms, open_esp_tab, check_esp, ESP_URL_PREFIX, MAX_ISTOCK_KEYWORDS)
 from video_utils import (VIDEO_EXTENSIONS, is_video_file, probe_video, check_video_requirements,
                          get_orientation, extract_frames)
 
@@ -278,14 +279,18 @@ function run(argv) {
 
 
 # Stock terms written as one word that the spell checker may not know: nightscape, skyscape, hyperlapse.
-# They are never split ("night, scape"), and a two-word AI keyword that makes one ("time lapse") is joined
+# They are never split ("night, scape"), two words of an AI keyword that make one are joined
+# ("time lapse footage" -> timelapse), and a bare "lapse" / "scape" is never a keyword
 COMPOUND_SUFFIXES = ('scape', 'scapes', 'lapse', 'lapses')
+# Stock terms that are one word on stock sites though the spell checker splits them ("copy, space")
+KEEP_GLUED = {'copyspace'}
 
 
 def find_glued_words(words, timeout=15):
     """{word: (first, second)} for words glued from two real words ("railwayline" -> railway, line).
     Stock sites reject such keywords. Empty dict if the macOS spell checker is not available"""
-    candidates = sorted({w for w in words if len(w) >= 6 and not w.endswith(COMPOUND_SUFFIXES)})
+    candidates = sorted({w for w in words if len(w) >= 6 and not w.endswith(COMPOUND_SUFFIXES)
+                         and w not in KEEP_GLUED})
     if not candidates:
         return {}
     try:
@@ -309,10 +314,15 @@ class ProcessingThread(QThread):
     progress = pyqtSignal(int, int)  # current, total
     log_message = pyqtSignal(str)
     finished = pyqtSignal(list)  # list of data for CSV
-    
+    esp_unavailable = pyqtSignal(str)  # ESP failed at the iStock step: the window asks Retry / Continue
+
     def __init__(self, input_folder, output_folder, generate_metadata=True, api_key=None, country='',
-                 shot_speed=SHOT_SPEEDS[0], stocks=tuple(STOCKS)):
+                 shot_speed=SHOT_SPEEDS[0], stocks=tuple(STOCKS), ask_esp_retry=False):
         super().__init__()
+        # ESP fails at the iStock step: ask the window to retry (True) or go on without ESP (False)
+        self.ask_esp_retry = ask_esp_retry
+        self._esp_answer = None
+        self._esp_answered = threading.Event()
         self.stocks = set(stocks)  # Stock sites to make CSVs for (keys of STOCKS)
         self._photo_rows = []  # Photo CSV rows (Shutterstock): filename, metadata
         self._csv_paths = {}  # CSV name -> file of this run (chosen on first write)
@@ -337,6 +347,24 @@ class ProcessingThread(QThread):
         """Stops processing"""
         self._stop_requested = True
         self.log_message.emit("Stopping processing...")
+
+    def answer_esp(self, retry):
+        """Answer of the window to esp_unavailable: True - retry ESP, False - go on without it"""
+        self._esp_answer = retry
+        self._esp_answered.set()
+
+    def esp_retry_wanted(self, error):
+        """Asks the window whether to retry ESP after it failed; waits for the answer.
+        False without asking when the run was started with "Continue without ESP" or is stopped"""
+        if not self.ask_esp_retry or self._stop_requested:
+            return False
+        self._esp_answer = None
+        self._esp_answered.clear()
+        self.esp_unavailable.emit(error)
+        while not self._esp_answered.wait(0.5):
+            if self._stop_requested:
+                return False
+        return bool(self._esp_answer)
         
     def _remember_log_line(self, message):
         self._log_lines.append(f"{datetime.now().strftime('%H:%M:%S')} - {message}")
@@ -1105,7 +1133,7 @@ class ProcessingThread(QThread):
                         add_keyword(part)
                     return
                 if (len(word) < 3 or word in STOP_WORDS or word in TITLE_CONNECTORS or word in keywords_seen or
-                        word in title_words_set or word in desc_words_set):
+                        word in title_words_set or word in desc_words_set or word in COMPOUND_SUFFIXES):
                     return
                 # Skip singular/plural duplicate of an existing keyword
                 if (word + 's' in keywords_seen or word + 'es' in keywords_seen or
@@ -1120,9 +1148,11 @@ class ProcessingThread(QThread):
                 words = self.normalize_words(kw)
                 if len(words) == 1:
                     add_keyword(words[0])
-                elif len(words) == 2 and ''.join(words).endswith(COMPOUND_SUFFIXES):
-                    add_keyword(''.join(words))
-                    phrase_parts.update(words)
+                    continue
+                for first, second in zip(words, words[1:]):
+                    if second in COMPOUND_SUFFIXES:
+                        add_keyword(first + second)
+                        phrase_parts.update((first, second))
             from_ai = len(keywords_list)
             # Supplement from other AI words (title/description words are excluded by rules)
             for word in all_words_filtered:
@@ -1423,20 +1453,27 @@ class ProcessingThread(QThread):
         vocabulary = IstockVocabulary()
         all_words = [k.strip() for row in self._video_rows
                      for k in row['metadata'].get('keywords', '').split(',') if k.strip()]
-        missing = vocabulary.missing(all_words)
         suggestions = {}
-        try:
-            if open_esp_tab():
-                self.log_message.emit(f"    [iStock] No ESP tab was open: opened {ESP_URL_PREFIX} in Chrome")
-            if missing:
-                self.log_message.emit(f"    [iStock] Looking up {len(missing)} new words in ESP...")
-                vocabulary.update(esp_lookup_words(missing))
-                vocabulary.save()
-            suggestions = esp_title_suggestions([row['metadata'].get('title', '') for row in self._video_rows])
-        except EspUnavailable as e:
-            self.log_message.emit(f"    ⚠ [iStock] ESP is not available ({e}). Sign in to esp.gettyimages.com in Chrome "
-                                  f"and allow View > Developer > Allow JavaScript from Apple Events. "
-                                  f"Words not in the saved vocabulary stay as is, no title suggestions")
+        while True:
+            try:
+                if open_esp_tab():
+                    self.log_message.emit(f"    [iStock] No ESP tab was open: opened {ESP_URL_PREFIX} in Chrome")
+                missing = vocabulary.missing(all_words)
+                if missing:
+                    self.log_message.emit(f"    [iStock] Looking up {len(missing)} new words in ESP...")
+                    vocabulary.update(esp_lookup_words(missing))
+                    vocabulary.save()
+                suggestions = esp_title_suggestions([row['metadata'].get('title', '') for row in self._video_rows])
+                break
+            except EspUnavailable as e:
+                # Metadata of all clips is kept: a retry repeats only this step
+                if self.esp_retry_wanted(str(e)):
+                    self.log_message.emit(f"    [iStock] ESP failed ({e}), retrying...")
+                    continue
+                self.log_message.emit(f"    ⚠ [iStock] ESP is not available ({e}). Sign in to esp.gettyimages.com in Chrome "
+                                      f"and allow View > Developer > Allow JavaScript from Apple Events. "
+                                      f"Words not in the saved vocabulary stay as is, no title suggestions")
+                break
         unknown_total = set()
         for row in self._video_rows:
             meta = row['metadata']
@@ -1871,10 +1908,21 @@ class KeyCutterApp(QMainWindow):
         if self.processing_thread and self.processing_thread.isRunning():
             QMessageBox.warning(self, "Warning", "Processing already in progress")
             return
-        
+
+        stocks = self.save_stocks()
+        # iStock keywords need ESP: check it now, not after all clips are described
+        ask_esp_retry = False
+        if 'istock' in stocks:
+            esp_ready = self.esp_ready_to_start()
+            if esp_ready is None:
+                return
+            ask_esp_retry = esp_ready
+
         # Clear log
         self.log_text.clear()
-        
+        if 'istock' in stocks and not ask_esp_retry:
+            self.log("[UI] iStock: continuing without ESP, new words stay as is")
+
         # Manage buttons
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)  # Activate stop button
@@ -1892,8 +1940,7 @@ class KeyCutterApp(QMainWindow):
         
         country = self.country_edit.text().strip()
         shot_speed = self.shot_speed_combo.currentText()
-        stocks = self.save_stocks()
-        
+
         self.log(f"[UI] Creating processing thread: api_type=openai (GPT), generate_metadata=True")
         
         # Metadata generation always enabled by default
@@ -1904,13 +1951,58 @@ class KeyCutterApp(QMainWindow):
             api_key=api_key,  # Using automatic key, if no other specified
             country=country,
             shot_speed=shot_speed,
-            stocks=stocks
+            stocks=stocks,
+            ask_esp_retry=ask_esp_retry
         )
         self.processing_thread.progress.connect(self.update_progress)
         self.processing_thread.log_message.connect(self.log)
         self.processing_thread.finished.connect(self.processing_finished)
+        self.processing_thread.esp_unavailable.connect(self.on_esp_unavailable)
         self._processing_stopped = False  # Reset stop flag
         self.processing_thread.start()
+
+    def esp_choice(self, error, at_start):
+        """Asks what to do when ESP does not answer: 'retry', 'skip' (go on without ESP)
+        or 'cancel' (before a run only)"""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("ESP is not available")
+        box.setText("iStock keywords are checked in Getty ESP, but ESP does not answer.")
+        box.setInformativeText(f"{error}\n\nSign in to esp.gettyimages.com in Chrome and press Retry."
+                               + ("" if at_start else "\nThe clips are already described: only the iStock step "
+                                                      "is repeated."))
+        retry = box.addButton("Retry", QMessageBox.ButtonRole.AcceptRole)
+        skip = box.addButton("Continue without ESP",
+                             QMessageBox.ButtonRole.ActionRole if at_start else QMessageBox.ButtonRole.RejectRole)
+        if at_start:
+            box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(retry)
+        box.exec()
+        if box.clickedButton() is retry:
+            return 'retry'
+        if box.clickedButton() is skip or not at_start:
+            return 'skip'
+        return 'cancel'
+
+    def esp_ready_to_start(self):
+        """Before a run with iStock: True if ESP answers, False to go on without it, None to cancel the run"""
+        while True:
+            QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+            try:
+                check_esp()
+                return True
+            except EspUnavailable as e:
+                error = str(e)
+            finally:
+                QApplication.restoreOverrideCursor()
+            choice = self.esp_choice(error, at_start=True)
+            if choice != 'retry':
+                return False if choice == 'skip' else None
+
+    def on_esp_unavailable(self, error):
+        """ESP failed at the iStock step of a run: the processing thread waits for this answer"""
+        if self.processing_thread:
+            self.processing_thread.answer_esp(self.esp_choice(error, at_start=False) == 'retry')
     
     def update_progress(self, current, total):
         """Updates progress bar"""

@@ -160,6 +160,13 @@ def esp_lookup_words(words):
     return result
 
 
+def check_esp():
+    """Opens ESP if no tab is open and asks its vocabulary about one word. EspUnavailable if ESP cannot
+    answer (not signed in, JavaScript from Apple Events is off...). Nothing is saved"""
+    open_esp_tab()
+    esp_lookup_words(['tree'])
+
+
 def esp_title_suggestions(titles):
     """ESP "Get suggestions" terms for each title: {title: [term, ...]}"""
     titles = list(dict.fromkeys(titles))

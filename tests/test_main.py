@@ -13,6 +13,12 @@ from unittest import mock
 
 os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
 
+from PyQt6.QtWidgets import QApplication  # noqa: E402
+
+# One application for the whole run, created before any Qt object: one created mid-run (by the first
+# window test) made PyQt treat a new ProcessingThread of a later test as deleted
+QT_APP = QApplication.instance() or QApplication([])
+
 import main  # noqa: E402
 import istock_keywords  # noqa: E402
 
@@ -205,6 +211,14 @@ class MetadataRulesTest(unittest.TestCase):
         keywords = generate(self.thread, response)['keywords'].split(', ')
         self.assertEqual(keywords[:2], ['timelapse', 'nightscape'])
         for part in ('time', 'lapse', 'night', 'scape'):
+            self.assertNotIn(part, keywords)
+
+    def test_compound_inside_longer_phrase_joined(self):
+        # "time lapse footage" is a phrase (skipped), but its time + lapse still make one keyword
+        response = dict(AI_RESPONSE, keywords="time lapse footage, lapse, scape, " + AI_RESPONSE['keywords'])
+        keywords = generate(self.thread, response)['keywords'].split(', ')
+        self.assertEqual(keywords[0], 'timelapse')
+        for part in ('time', 'lapse', 'scape', 'footage'):
             self.assertNotIn(part, keywords)
 
     def test_short_title_padded_from_keywords_not_description(self):
@@ -505,9 +519,9 @@ class GluedWordsTest(unittest.TestCase):
         self.assertEqual(FIND_GLUED_WORDS(['car', 'rail']), {})  # short words are not checked
 
     def test_compound_terms_not_split(self):
-        # The spell checker does not know nightscape, but "night, scape" is not a stock keyword
+        # The spell checker does not know nightscape, but "night, scape" or "copy, space" are no stock keywords
         with mock.patch.object(main.subprocess, 'run') as run:
-            self.assertEqual(FIND_GLUED_WORDS(['nightscape', 'hyperlapse', 'skyscapes']), {})
+            self.assertEqual(FIND_GLUED_WORDS(['nightscape', 'hyperlapse', 'skyscapes', 'copyspace']), {})
         run.assert_not_called()
         self.assertEqual(FIND_GLUED_WORDS(['nightscape', 'railwayline']), {'railwayline': ('railway', 'line')})
 
@@ -943,13 +957,10 @@ class BatchProcessingTest(unittest.TestCase):
 
 
 
-class RememberedSettingsTest(unittest.TestCase):
-    """Folders and settings survive a restart, shot speed is Real Time at every launch.
-    Settings go to a temporary ini file, never to the user's real settings"""
+class WindowTestCase(unittest.TestCase):
+    """Main window tests: settings go to a temporary ini file, never to the user's real settings"""
 
     def setUp(self):
-        from PyQt6.QtWidgets import QApplication
-        self.qt_app = QApplication.instance() or QApplication([])
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.tmp = Path(tmp.name)
@@ -964,6 +975,10 @@ class RememberedSettingsTest(unittest.TestCase):
         window = main.KeyCutterApp()
         self.addCleanup(window.close)
         return window
+
+
+class RememberedSettingsTest(WindowTestCase):
+    """Folders and settings survive a restart, shot speed is Real Time at every launch"""
 
     def test_restart_keeps_settings_except_shot_speed(self):
         source, output = self.tmp / 'source', self.tmp / 'output'
@@ -990,6 +1005,52 @@ class RememberedSettingsTest(unittest.TestCase):
         self.assertIsNone(window.selected_folder)
         self.assertEqual(window.folder_path_edit.text(), '')
 
+
+
+class EspBeforeStartTest(WindowTestCase):
+    """With iStock checked, ESP is checked before the run, not after all clips are described"""
+
+    def start(self, check_results, choices, stocks=('adobe', 'istock')):
+        source = self.tmp / 'source'
+        source.mkdir(exist_ok=True)
+        window = self.open_window()
+        window.selected_folder = window.output_folder = str(source)
+        for key, checkbox in window.stock_checkboxes.items():
+            checkbox.setChecked(key in stocks)
+        check = mock.Mock(side_effect=check_results)
+        thread_class = mock.Mock()
+        with mock.patch.object(main, 'check_esp', check), \
+                mock.patch.object(window, 'esp_choice', mock.Mock(side_effect=choices)) as choice, \
+                mock.patch.object(main, 'ProcessingThread', thread_class):
+            window.start_processing()
+        return check, choice, thread_class
+
+    def test_esp_answers(self):
+        check, choice, thread_class = self.start([None], [])
+        choice.assert_not_called()
+        self.assertTrue(thread_class.call_args.kwargs['ask_esp_retry'])
+        thread_class.return_value.start.assert_called_once()
+
+    def test_retry_then_answers(self):
+        unavailable = main.EspUnavailable('asks to sign in')
+        check, choice, thread_class = self.start([unavailable, None], ['retry'])
+        self.assertEqual(check.call_count, 2)
+        choice.assert_called_once_with('asks to sign in', at_start=True)
+        self.assertTrue(thread_class.call_args.kwargs['ask_esp_retry'])
+
+    def test_continue_without_esp(self):
+        check, choice, thread_class = self.start([main.EspUnavailable('x')], ['skip'])
+        self.assertFalse(thread_class.call_args.kwargs['ask_esp_retry'])
+        thread_class.return_value.start.assert_called_once()
+
+    def test_cancel(self):
+        check, choice, thread_class = self.start([main.EspUnavailable('x')], ['cancel'])
+        thread_class.assert_not_called()
+
+    def test_no_check_without_istock(self):
+        check, choice, thread_class = self.start([], [], stocks=('adobe', 'shutterstock'))
+        check.assert_not_called()
+        self.assertFalse(thread_class.call_args.kwargs['ask_esp_retry'])
 
 if __name__ == '__main__':
     unittest.main()

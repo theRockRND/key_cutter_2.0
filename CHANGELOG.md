@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.15
+
+### Added
+- ESP is checked when **Start processing** is pressed with iStock checked, not after all clips are described: the app opens ESP if needed and asks its vocabulary about one word. If ESP does not answer (not signed in...), a window offers **Retry** (sign in and try again), **Continue without ESP** (new iStock words stay as is) or **Cancel**
+- If ESP stops answering during the run, the iStock step asks the same way (**Retry** / **Continue without ESP**) instead of finishing without ESP. The clips are already described, so Retry repeats only the iStock step: no second run and no new AI requests
+
+### Fixed
+- `time lapse` inside a longer AI keyword (`time lapse footage`) is joined too: such phrases are skipped, and their `time`, `lapse` used to come in as two keywords. A bare `lapse` / `scape` is never a keyword
+- `copyspace` is not split into `copy`, `space` (a stock term the spell checker does not know)
+
 ## 1.1.14
 
 ### Added

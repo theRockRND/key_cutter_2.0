@@ -114,6 +114,7 @@ class RefineIstockKeywordsTest(unittest.TestCase):
                                                          'newword': []})),  # as esp_lookup_words: [] if unknown
             mock.patch.object(main, 'esp_title_suggestions', mock.Mock(
                 return_value={'Railway Track Through Pine Forest': ['Forest', 'Green Mountains - Appalachians']})),
+            mock.patch.object(main, 'open_esp_tab', mock.Mock(return_value=False)),  # never the real Chrome
         ]
         for patch in patches:
             patch.start()
@@ -180,6 +181,53 @@ class RefineIstockKeywordsTest(unittest.TestCase):
         main.esp_lookup_words.assert_not_called()
         self.assertIn('ESP is not available (asks to sign in). Sign in to esp.gettyimages.com', '\n'.join(self.thread.logs))
 
+
+    def test_esp_retry_repeats_only_istock_step(self):
+        self.thread.api_key = None
+        self.thread.ask_esp_retry = True
+        lookup = main.esp_lookup_words
+        lookup.side_effect = [istock_keywords.EspUnavailable("asks to sign in"), lookup.return_value]
+        asked = []
+        self.thread.esp_unavailable.connect(lambda error: (asked.append(error), self.thread.answer_esp(True)))
+        self.thread.refine_istock_keywords()
+        self.assertEqual(asked, ['asks to sign in'])
+        self.assertEqual(lookup.call_count, 2)
+        self.assertEqual(self.thread._video_rows[0]['metadata']['istock_keywords'], 'Tree')
+        log = '\n'.join(self.thread.logs)
+        self.assertIn('ESP failed (asks to sign in), retrying...', log)
+        self.assertNotIn('ESP is not available', log)
+
+    def test_esp_retry_declined(self):
+        self.thread.api_key = None
+        self.thread.ask_esp_retry = True
+        main.esp_lookup_words.side_effect = istock_keywords.EspUnavailable("asks to sign in")
+        self.thread.esp_unavailable.connect(lambda error: self.thread.answer_esp(False))
+        self.thread.refine_istock_keywords()
+        main.esp_lookup_words.assert_called_once()
+        self.assertIn('ESP is not available (asks to sign in)', '\n'.join(self.thread.logs))
+
+    def test_no_question_when_started_without_esp(self):
+        self.thread.api_key = None
+        main.esp_lookup_words.side_effect = istock_keywords.EspUnavailable("x")
+        asked = []
+        self.thread.esp_unavailable.connect(asked.append)
+        self.thread.refine_istock_keywords()
+        self.assertEqual(asked, [])
+
+
+class CheckEspTest(unittest.TestCase):
+    def test_opens_tab_and_asks_one_word(self):
+        with mock.patch.object(istock_keywords, 'open_esp_tab') as open_tab, \
+                mock.patch.object(istock_keywords, 'esp_lookup_words') as lookup:
+            istock_keywords.check_esp()
+        open_tab.assert_called_once()
+        lookup.assert_called_once_with(['tree'])
+
+    def test_error_is_raised(self):
+        with mock.patch.object(istock_keywords, 'open_esp_tab',
+                               side_effect=istock_keywords.EspUnavailable("asks to sign in")):
+            with self.assertRaises(istock_keywords.EspUnavailable):
+                istock_keywords.check_esp()
 
 class OpenEspTabTest(unittest.TestCase):
     def run_with(self, stdout, returncode=0):
