@@ -68,7 +68,7 @@ def save_api_key(api_key):
         print(f"Failed to save API key to keychain: {e}")
         return False
 
-__version__ = "1.1.15"
+__version__ = "1.1.16"
 
 # Local models removed - using only OpenAI API
 
@@ -1348,8 +1348,12 @@ class ProcessingThread(QThread):
         """Adds a clip to the video CSVs of the selected stock sites: Adobe Stock (Filename, Title, Keywords,
         Category, Releases), iStock (ESP template columns), Shutterstock (Filename, Description, Keywords...)"""
         created = shoot_date_from_filename(filename)
-        if not created and 'istock' in self.stocks:
-            self.log_message.emit(f"    ⚠ [Write] No shooting date in file name {filename}: set Date Created in ESP")
+        if not created:
+            # ESP requires Date Created: without it the clip cannot be submitted
+            created = datetime.now().strftime('%m/%d/%Y')
+            if 'istock' in self.stocks:
+                self.log_message.emit(f"    ⚠ [Write] No shooting date in file name {filename}: "
+                                      f"Date Created set to today ({created}), change it in ESP if needed")
         self._video_rows.append({'filename': filename, 'metadata': metadata, 'created': created,
                                  'poster': poster_timecode(video_info)})
         self.write_csvs()

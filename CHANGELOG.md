@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.16
+
+### Changed
+- `date created` in the iStock CSV is today's date when the file name has no shooting date (`1.mov`), not empty: ESP requires it and did not let such clips be submitted (`recorded_date can't be blank`). The log says which clips got today's date, change it in ESP if needed
+
 ## 1.1.15
 
 ### Added

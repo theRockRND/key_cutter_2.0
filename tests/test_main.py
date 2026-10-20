@@ -849,7 +849,8 @@ class BatchProcessingTest(unittest.TestCase):
             self.assertTrue(istock_row['description'])
             self.assertEqual(istock_row['country'], 'Serbia')
             self.assertEqual(istock_row['poster timecode'], '00:00:03:00')  # middle of a 6 s clip
-            self.assertEqual(istock_row['date created'], '')  # no date in test file names
+            # no date in test file names: today
+            self.assertEqual(istock_row['date created'], main.datetime.now().strftime('%m/%d/%Y'))
             self.assertEqual(istock_row['shot speed'], 'Real Time')  # default
 
         shutterstock = self.read_csv(main.SHUTTERSTOCK_VIDEO_CSV_NAME)
@@ -921,7 +922,7 @@ class BatchProcessingTest(unittest.TestCase):
         self.assertEqual({r['country'] for r in self.read_csv(main.ISTOCK_VIDEO_CSV_NAME)}, {''})
         log = '\n'.join(thread.logs)
         self.assertIn('Country of shoot is empty in the iStock CSV', log)
-        self.assertIn('No shooting date in file name a_ok.mp4', log)
+        self.assertIn('No shooting date in file name a_ok.mp4: Date Created set to today', log)
 
     def test_istock_not_selected(self):
         thread = self.run_batch(lambda path, info=None: dict(AI_RESPONSE), stocks=['adobe'])
