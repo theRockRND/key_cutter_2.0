@@ -68,7 +68,7 @@ def save_api_key(api_key):
         print(f"Failed to save API key to keychain: {e}")
         return False
 
-__version__ = "1.1.16"
+__version__ = "1.1.17"
 
 # Local models removed - using only OpenAI API
 
@@ -86,7 +86,7 @@ Return ONLY a JSON object with this exact structure (no markdown, no code blocks
   "title": "descriptive title based on what you see in the image, English only, no special characters",
   "description": "one natural English sentence about the image, 40-80 characters, no special characters",
   "keywords": "comma-separated list of 65 individual words describing the image content, English only, no special characters, only single words not phrases",
-  "categories": "1 or 2 comma-separated categories, best fitting first, ONLY from: Animals/Wildlife, Arts, Backgrounds/Textures, Buildings/Landmarks, Business/Finance, Education, Food and drink, Healthcare/Medical, Holidays, Industrial, Nature, Objects, People, Religion, Science, Signs/Symbols, Sports/Recreation, Technology, Transportation"
+  "categories": "1 or 2 comma-separated categories, best fitting first, ONLY from: Animals/Wildlife, Backgrounds/Textures, Buildings/Landmarks, Business/Finance, Education, Food and drink, Healthcare/Medical, Holidays, Industrial, Nature, Objects, People, Religion, Science, Signs/Symbols, Sports/Recreation, Technology, Transportation"
 }
 
 CRITICAL RULES:
@@ -117,8 +117,9 @@ SHUTTERSTOCK_CSV_FIELDS = ['Filename', 'Description', 'Keywords', 'Categories', 
                            'illustration']
 SHUTTERSTOCK_MAX_DESCRIPTION = 200
 # Category 1 (required) and Category 2 (optional) on Shutterstock: names as in the site list for videos
-# (photos have these and a few more). The AI picks them, ANALYSIS_PROMPT lists the same names
-SHUTTERSTOCK_CATEGORIES = ['Animals/Wildlife', 'Arts', 'Backgrounds/Textures', 'Buildings/Landmarks', 'Business/Finance',
+# (photos have these and a few more). The AI picks them, ANALYSIS_PROMPT lists the same names.
+# No 'Arts': the Shutterstock CSV upload rejects it for videos (ERROR_MEDIA_CATEGORIES_INVALID)
+SHUTTERSTOCK_CATEGORIES = ['Animals/Wildlife', 'Backgrounds/Textures', 'Buildings/Landmarks', 'Business/Finance',
                            'Education', 'Food and drink', 'Healthcare/Medical', 'Holidays', 'Industrial', 'Nature',
                            'Objects', 'People', 'Religion', 'Science', 'Signs/Symbols', 'Sports/Recreation',
                            'Technology', 'Transportation']

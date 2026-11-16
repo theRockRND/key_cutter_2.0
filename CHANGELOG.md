@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.1.17
+
+### Fixed
+- Shutterstock CSVs no longer use the `Arts` category: the Shutterstock CSV upload rejected such clips with `ERROR_MEDIA_CATEGORIES_INVALID`. The AI no longer gets it in the list, and an `Arts` it still gives is dropped (the other category stays)
+
 ## 1.1.16
 
 ### Changed

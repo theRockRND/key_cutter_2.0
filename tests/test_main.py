@@ -151,6 +151,11 @@ class MetadataRulesTest(unittest.TestCase):
         self.assertEqual(generate(self.thread, response, HD)['shutterstock_categories'], ['Nature', 'Transportation'])
         self.assertIn('SHUTTERSTOCK CATEGORIES: Nature, Transportation', '\n'.join(self.thread.logs))
 
+    def test_shutterstock_arts_category_dropped(self):
+        # Shutterstock rejects Arts for videos (ERROR_MEDIA_CATEGORIES_INVALID)
+        response = dict(AI_RESPONSE, categories='Arts, Objects')
+        self.assertEqual(generate(self.thread, response, HD)['shutterstock_categories'], ['Objects'])
+
     def test_shutterstock_categories_from_keywords_without_ai_pick(self):
         # AI_RESPONSE has no categories; 'nature' is among its keywords
         self.assertEqual(generate(self.thread, AI_RESPONSE, HD)['shutterstock_categories'], ['Nature'])
